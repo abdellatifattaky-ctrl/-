@@ -1,7 +1,7 @@
-langchain==0.1.0
-langchain-community==0.0.10
-langchain-openai==0.0.2
 streamlit
+langchain
+langchain-community
+langchain-openai
 PyPDF2
 faiss-cpu
 sentence-transformers
