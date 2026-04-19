@@ -2,12 +2,15 @@ import streamlit as st
 import os
 from PyPDF2 import PdfReader
 
-# استدعاءات حديثة ومستقرة تماماً
+# استدعاءات متوافقة مع أحدث تقسيمات المكتبة 2026
+import langchain
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
+# الطريقة الأكثر أماناً للاستدعاء لتجنب ModuleNotFoundError
+from langchain.chains.combine_documents.stuff import StuffDocumentsChain
+from langchain.chains.llm import LLMChain
+from langchain_core.prompts import PromptTemplate
 from langchain.schema import Document
 
 # --- إعدادات الأمان ---
@@ -32,7 +35,7 @@ def load_legal_docs(folder_path):
                         documents.append(Document(page_content=text, metadata={"source": filename, "page": i + 1}))
     return documents
 
-# --- الواجهة ---
+# --- واجهة المستخدم ---
 st.set_page_config(page_title="المستشار القانوني للجماعات", layout="wide")
 st.title("⚖️ منصة الذكاء الاصطناعي للقوانين الجماعية")
 
@@ -53,7 +56,7 @@ with st.sidebar:
             else:
                 st.error("تأكد من وجود الملفات ومفتاح API.")
 
-# --- محرك البحث الحديث ---
+# --- محرك البحث ---
 query = st.text_input("🔍 اسأل عن أي مقتضى قانوني:")
 
 if query and openai_api_key:
@@ -61,23 +64,25 @@ if query and openai_api_key:
         embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
         db = FAISS.load_local("legal_vector_db", embeddings, allow_dangerous_deserialization=True)
         
-        # 1. استرجاع النصوص ذات الصلة
+        # 1. استرجاع النصوص
         retrieved_docs = db.similarity_search(query, k=3)
         
-        # 2. إعداد القالب (Prompt)
-        prompt = ChatPromptTemplate.from_template("""
-        أجب على السؤال بناءً على النصوص القانونية المقدمة فقط:
-        <context>
+        # 2. بناء السلسلة يدوياً لضمان عدم حدوث خطأ في المسارات
+        prompt_template = """أجب على السؤال التالي بناءً على النصوص القانونية المقدمة فقط:
         {context}
-        </context>
-        السؤال: {input}""")
-
-        # 3. إنشاء السلسلة الحديثة
-        llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=openai_api_key)
-        document_chain = create_stuff_documents_chain(llm, prompt)
+        السؤال: {question}
+        الإجابة:"""
+        PROMPT = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
         
-        # 4. توليد الإجابة
-        response = document_chain.invoke({"input": query, "context": retrieved_docs})
+        llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=openai_api_key)
+        llm_chain = LLMChain(llm=llm, prompt=PROMPT)
+        
+        combine_documents_chain = StuffDocumentsChain(
+            llm_chain=llm_chain, document_variable_name="context"
+        )
+        
+        # 3. توليد الإجابة
+        response = combine_documents_chain.run(input_documents=retrieved_docs, question=query)
         
         st.markdown("### 📝 الإجابة القانونية:")
         st.info(response)
