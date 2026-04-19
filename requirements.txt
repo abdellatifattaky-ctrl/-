@@ -1,11 +1,9 @@
 streamlit
+PyPDF2
 langchain
 langchain-community
 langchain-openai
-PyPDF2
+langchain-text-splitters
 faiss-cpu
-sentence-transformers
-arabic-reshaper
-python-bidi
 openai
 tiktoken
