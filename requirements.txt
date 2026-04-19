@@ -3,5 +3,9 @@ langchain
 PyPDF2
 faiss-cpu
 sentence-transformers
+arabic-reshaper
+python-bidi
 openai
 tiktoken
+langchain-community
+langchain-openai
