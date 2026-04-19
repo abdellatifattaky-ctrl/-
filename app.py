@@ -2,28 +2,28 @@ import streamlit as st
 import os
 from PyPDF2 import PdfReader
 
-# --- استدعاءات LangChain الحديثة ---
+# استدعاءات LangChain الحديثة والمستقرة
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains import create_retrieval_chain
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
 
 # --- إعدادات الصفحة ---
 st.set_page_config(page_title="المستشار القانوني للجماعات", layout="wide")
 st.title("⚖️ منصة الذكاء الاصطناعي للقوانين الجماعية")
 
-# --- إعدادات الأمان ومفاتيح API ---
-# سيحاول التطبيق القراءة من Secrets أولاً، وإذا لم يجدها سيطلبها من المستخدم
+# --- إعدادات مفتاح API ---
+# يقرأ من Secrets في Streamlit Cloud أو من مدخل جانبي
 openai_api_key = st.secrets.get("OPENAI_API_KEY") or st.sidebar.text_input("OpenAI API Key", type="password")
 
 if not openai_api_key:
-    st.info("يرجى إضافة مفتاح OpenAI API للبدء.")
+    st.info("يرجى إضافة مفتاح OpenAI API في الإعدادات للبدء.")
     st.stop()
 
-# --- وظيفة معالجة الملفات ---
+# --- وظيفة معالجة ملفات PDF ---
 def load_legal_docs(folder_path):
     documents = []
     if not os.path.exists(folder_path):
@@ -42,10 +42,10 @@ def load_legal_docs(folder_path):
                 if text:
                     documents.append(Document(page_content=text, metadata={"source": filename, "page": i + 1}))
         except Exception as e:
-            st.error(f"خطأ في قراءة الملف {filename}: {e}")
+            st.error(f"خطأ في قراءة {filename}: {e}")
     return documents
 
-# --- القائمة الجانبية ---
+# --- القائمة الجانبية للفهرسة ---
 lib_path = "laws_library"
 
 with st.sidebar:
@@ -59,51 +59,53 @@ with st.sidebar:
                 embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
                 vector_db = FAISS.from_documents(chunks, embeddings)
                 vector_db.save_local("legal_vector_db")
-                st.success(f"تمت فهرسة {len(raw_docs)} صفحة بنجاح!")
+                st.success(f"تمت فهرسة {len(raw_docs)} صفحة قانونية!")
             else:
-                st.error("المجلد فارغ! يرجى إضافة ملفات PDF في مجلد laws_library")
+                st.error("المجلد 'laws_library' فارغ! أضف ملفات PDF أولاً.")
 
-# --- محرك البحث والاسترجاع ---
+# --- محرك البحث الذكي ---
 query = st.text_input("🔍 اسأل عن أي مقتضى قانوني:")
 
 if query:
     if os.path.exists("legal_vector_db"):
-        with st.spinner("جاري البحث في النصوص القانونية..."):
+        with st.spinner("جاري تحليل النصوص القانونية..."):
             # 1. تحميل قاعدة البيانات
             embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
             db = FAISS.load_local("legal_vector_db", embeddings, allow_dangerous_deserialization=True)
-            
-            # 2. إعداد القالب (Prompt)
-            system_prompt = (
-                "أنت مستشار قانوني خبير. استخدم النصوص القانونية المقدمة فقط للإجابة على السؤال. "
-                "إذا لم تجد الإجابة في النصوص، قل أنك لا تعرف، لا تحاول اختراع إجابة."
-                "\n\n"
-                "{context}"
-            )
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", system_prompt),
-                ("human", "{input}"),
-            ])
+            retriever = db.as_retriever(search_kwargs={"k": 5})
 
-            # 3. بناء سلسلة الاسترجاع (Retrieval Chain)
+            # 2. إعداد القالب (Prompt)
+            template = """أنت مستشار قانوني خبير. أجب على السؤال بناءً على النصوص القانونية التالية فقط:
+            {context}
+            
+            السؤال: {question}
+             الإجابة التفصيلية:"""
+            
+            prompt = ChatPromptTemplate.from_template(template)
             llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=openai_api_key)
-            combine_docs_chain = create_stuff_documents_chain(llm, prompt)
-            retrieval_chain = create_retrieval_chain(db.as_retriever(search_kwargs={"k": 5}), combine_docs_chain)
+
+            # 3. بناء السلسلة (الطريقة الحديثة LCEL)
+            def format_docs(docs):
+                return "\n\n".join([d.page_content for d in docs])
+
+            rag_chain = (
+                {"context": retriever | format_docs, "question": RunnablePassthrough()}
+                | prompt
+                | llm
+                | StrOutputParser()
+            )
+
+            # 4. التنفيذ والعرض
+            response = rag_chain.invoke(query)
+            docs = retriever.get_relevant_documents(query)
             
-            # 4. تنفيذ البحث
-            response = retrieval_chain.invoke({"input": query})
-            
-            # 5. عرض النتائج
             st.markdown("### 📝 الإجابة القانونية:")
-            st.info(response["answer"])
+            st.info(response)
             
             st.markdown("---")
-            st.subheader("📚 المصادر المعتمدة:")
-            # عرض المصادر بدون تكرار
-            sources = set()
-            for doc in response["context"]:
-                sources.add(f"🔹 {doc.metadata['source']} (ص {doc.metadata['page']})")
-            for source in sources:
-                st.write(source)
+            st.subheader("📚 المصادر المستند إليها:")
+            sources = set(f"🔹 {d.metadata['source']} (ص {d.metadata['page']})" for d in docs)
+            for s in sources:
+                st.write(s)
     else:
-        st.warning("يرجى الضغط على زر 'تحديث وفهرسة القوانين' أولاً.")
+        st.warning("يرجى فهرسة القوانين من القائمة الجانبية أولاً.")
