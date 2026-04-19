@@ -4,6 +4,7 @@ langchain
 langchain-community
 langchain-openai
 langchain-text-splitters
+langchain-core
 faiss-cpu
 openai
 tiktoken
