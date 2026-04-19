@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import zipfile
+import time
 from PyPDF2 import PdfReader
 
 # استدعاءات Google Gemini و LangChain
@@ -13,50 +14,55 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
 
 # --- إعدادات الصفحة ---
-st.set_page_config(page_title="المستشار القانوني للجماعات (Gemini)", layout="wide")
-st.title("⚖️ منصة الذكاء الاصطناعي للقوانين (مدعوم من Gemini)")
+st.set_page_config(page_title="المستشار القانوني (Gemini Edition)", layout="wide")
+st.title("⚖️ منصة الذكاء الاصطناعي للقوانين الجماعية")
+st.markdown("---")
 
 # --- إعدادات مفتاح API ---
-# احصل على مفتاحك من: https://aistudio.google.com/
 gemini_api_key = st.secrets.get("GEMINI_API_KEY") or st.sidebar.text_input("Gemini API Key", type="password")
 
 if not gemini_api_key:
-    st.info("⚠️ يرجى إضافة مفتاح Gemini API للبدء. يمكنك الحصول عليه مجاناً من Google AI Studio.")
+    st.warning("⚠️ يرجى إضافة مفتاح Gemini API في الإعدادات (Secrets) للبدء.")
     st.stop()
 
-# --- وظائف معالجة الملفات ---
+# --- وظائف المساعدة ---
 def handle_zip_file(zip_path, extract_to="laws_library"):
     if os.path.exists(zip_path):
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_to)
-        return True
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_to)
+            return True
+        except: return False
     return False
 
-def load_legal_docs(folder_path):
+def load_docs_from_folder(folder_path):
     documents = []
-    if not os.path.exists(folder_path): return None
-    files = [f for f in os.listdir(folder_path) if f.endswith('.pdf')]
-    for filename in files:
-        path = os.path.join(folder_path, filename)
-        try:
-            reader = PdfReader(path)
-            for i, page in enumerate(reader.pages):
-                text = page.extract_text()
-                if text:
-                    documents.append(Document(page_content=text, metadata={"source": filename, "page": i + 1}))
-        except: continue
+    if not os.path.exists(folder_path): return []
+    for filename in os.listdir(folder_path):
+        if filename.endswith('.pdf'):
+            path = os.path.join(folder_path, filename)
+            try:
+                reader = PdfReader(path)
+                for i, page in enumerate(reader.pages):
+                    text = page.extract_text()
+                    if text:
+                        documents.append(Document(page_content=text, metadata={"source": filename, "page": i + 1}))
+            except: continue
     return documents
 
-# --- القائمة الجانبية ---
+# --- القائمة الجانبية (الفهرسة) ---
 with st.sidebar:
-    st.header("⚙️ الإعدادات")
+    st.header("⚙️ إدارة البيانات")
+    
+    # فك الضغط تلقائياً إذا وجد الملف
     if os.path.exists("laws_library.zip"):
         handle_zip_file("laws_library.zip")
     
-    uploaded_files = st.file_uploader("ارفع ملفات PDF:", type="pdf", accept_multiple_files=True)
+    uploaded_files = st.file_uploader("رفع ملفات قانونية جديدة (PDF)", type="pdf", accept_multiple_files=True)
     
-    if st.button("🚀 بدء الفهرسة (Gemini)"):
+    if st.button("🚀 بدء الفهرسة الذكية"):
         all_docs = []
+        # تجميع الملفات المرفوعة
         if uploaded_files:
             for f in uploaded_files:
                 reader = PdfReader(f)
@@ -64,47 +70,72 @@ with st.sidebar:
                     text = page.extract_text()
                     if text: all_docs.append(Document(page_content=text, metadata={"source": f.name, "page": i + 1}))
         
-        folder_docs = load_legal_docs("laws_library")
-        if folder_docs: all_docs.extend(folder_docs)
+        # تجميع الملفات من المجلد
+        all_docs.extend(load_docs_from_folder("laws_library"))
 
         if all_docs:
-            with st.spinner("جاري التحليل باستخدام ذكاء Google..."):
-                splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
+            with st.spinner("جاري معالجة النصوص وتجنب الحظر..."):
+                splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
                 chunks = splitter.split_documents(all_docs)
                 
-                # استخدام Embeddings الخاصة بـ Google
                 embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=gemini_api_key)
-                vector_db = FAISS.from_documents(chunks, embeddings)
+                
+                # الفهرسة على دفعات لتجنب RateLimitError
+                batch_size = 30 
+                vector_db = None
+                progress_bar = st.progress(0)
+                
+                for i in range(0, len(chunks), batch_size):
+                    batch = chunks[i:i + batch_size]
+                    if vector_db is None:
+                        vector_db = FAISS.from_documents(batch, embeddings)
+                    else:
+                        vector_db.add_documents(batch)
+                    
+                    # تحديث التقدم وانتظار بسيط لتفادي ضغط الـ API
+                    progress_bar.progress(min((i + batch_size) / len(chunks), 1.0))
+                    time.sleep(1.5) 
+                
                 vector_db.save_local("legal_vector_db_gemini")
-                st.success("✅ تمت الفهرسة بنجاح مجاناً!")
+                st.success("✅ تمت الفهرسة بنجاح! يمكنك الآن طرح الأسئلة.")
         else:
-            st.error("لا توجد ملفات!")
+            st.error("لم يتم العثور على ملفات PDF للمعالجة.")
 
-# --- محرك البحث ---
-query = st.text_input("🔍 اسأل عن أي مقتضى قانوني:")
+# --- محرك البحث والاسترجاع ---
+query = st.text_input("🔍 اسأل عن أي مقتضى قانوني (مثلاً: ما هي اختصاصات رئيس المجلس؟)")
 
 if query:
     if os.path.exists("legal_vector_db_gemini"):
-        with st.spinner("جاري استخراج الإجابة..."):
+        with st.spinner("جاري استنباط الإجابة القانونية..."):
             embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=gemini_api_key)
             db = FAISS.load_local("legal_vector_db_gemini", embeddings, allow_dangerous_deserialization=True)
             
             llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=gemini_api_key, temperature=0)
             
-            template = """أنت مستشار قانوني. أجب بناءً على النصوص التالية فقط:
+            prompt = ChatPromptTemplate.from_template("""
+            أنت مستشار قانوني خبير في القوانين التنظيمية.
+            أجب على السؤال بناءً على المراجع التالية فقط. إذا لم تجد الإجابة، قل لا أعرف.
+            
+            المراجع:
             {context}
+            
             السؤال: {question}
-            الإجابة:"""
+            الإجابة القانونية المفصلة:""")
             
-            prompt = ChatPromptTemplate.from_template(template)
-            
-            rag_chain = (
-                {"context": db.as_retriever() | (lambda docs: "\n\n".join([d.page_content for d in docs])), 
+            chain = (
+                {"context": db.as_retriever(search_kwargs={"k": 5}) | (lambda docs: "\n\n".join([d.page_content for d in docs])), 
                  "question": RunnablePassthrough()}
                 | prompt | llm | StrOutputParser()
             )
-
-            st.markdown("### 📝 الإجابة:")
-            st.info(rag_chain.invoke(query))
+            
+            answer = chain.invoke(query)
+            st.markdown("### 📝 النتيجة:")
+            st.info(answer)
+            
+            # عرض المصادر
+            with st.expander("📚 المراجع المستخدمة في الإجابة"):
+                relevant_docs = db.similarity_search(query, k=5)
+                for d in relevant_docs:
+                    st.write(f"🔹 **{d.metadata['source']}** - صفحة {d.metadata['page']}")
     else:
-        st.warning("يرجى الفهرسة أولاً.")
+        st.warning("⚠️ قاعدة البيانات غير جاهزة. يرجى فهرسة الملفات من القائمة الجانبية أولاً.")
